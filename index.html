@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>City Time</title>
+<style>
+  :root { --ink:#1d1d1f; --mute:#6e6e73; --line:#d2d2d7; --bg:#fbfbf8; --accent:#0a5c4a; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; color:var(--ink); background:var(--bg); }
+  main { max-width:640px; margin:0 auto; padding:48px 20px; }
+  h1 { font-weight:600; font-size:1.6rem; margin:0 0 4px; }
+  .sub { color:var(--mute); margin:0 0 32px; font-size:.95rem; }
+  label { display:block; font-size:.8rem; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:20px 0 6px; }
+  input, select { width:100%; font:inherit; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  input:focus, select:focus { outline:2px solid var(--accent); outline-offset:-1px; border-color:transparent; }
+  .row { display:flex; gap:8px; }
+  .row input { flex:1; }
+  button { font:inherit; padding:10px 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #matches { margin-top:8px; display:none; }
+  .clock { margin-top:36px; padding:28px 24px; border:1px solid var(--line); border-radius:12px; background:#fff; }
+  .place { color:var(--mute); font-size:.95rem; margin-bottom:6px; }
+  .time { font-size:2.2rem; font-weight:500; font-variant-numeric:tabular-nums; word-break:break-word; }
+  .meta { margin-top:10px; font-size:.85rem; color:var(--mute); }
+  details { margin-top:28px; font-size:.9rem; color:var(--mute); }
+  summary { cursor:pointer; }
+  table { border-collapse:collapse; margin-top:8px; width:100%; }
+  td { padding:3px 8px 3px 0; vertical-align:top; }
+  td:first-child { font-family:ui-monospace, Menlo, monospace; color:var(--ink); white-space:nowrap; }
+  .err { color:#b00020; }
+</style>
+</head>
+<body>
+<main>
+  <h1>City Time</h1>
+  <p class="sub">Type a city, pick a format. The time comes from a reference clock where one is reachable, then gets converted to that city's local time zone.</p>
+
+  <label for="city">City</label>
+  <form class="row" id="cityForm">
+	<input id="city" placeholder="e.g. Kyoto, Lisbon, Clermont" autocomplete="off">
+	<button id="go">Find</button>
+  </form>
+  <select id="matches" aria-label="Matching places"></select>
+
+  <label for="preset">Format</label>
+  <select id="preset">
+	<option value="h:mm:ss A">3:07:09 PM</option>
+	<option value="HH:mm:ss">15:07:09 (24-hour)</option>
+	<option value="dddd, MMMM D, YYYY · h:mm A">Tuesday, November 10, 2026 · 3:07 PM</option>
+	<option value="YYYY-MM-DD HH:mm:ss ZZ">2026-11-10 15:07:09 -05:00 (ISO-ish)</option>
+	<option value="ddd D MMM, HH:mm z">Tue 10 Nov, 15:07 EST</option>
+	<option value="custom">Custom…</option>
+  </select>
+  <input id="format" style="margin-top:8px" value="h:mm:ss A" spellcheck="false" aria-label="Format string">
+
+  <div class="clock">
+	<div class="place" id="place">No city yet</div>
+	<div class="time" id="time">—</div>
+	<div class="meta" id="meta">Checking reference clock…</div>
+  </div>
+
+  <details>
+	<summary>Format tokens</summary>
+	<table>
+	  <tr><td>YYYY / YY</td><td>2026 / 26</td></tr>
+	  <tr><td>MMMM / MMM / MM / M</td><td>November / Nov / 11 / 11</td></tr>
+	  <tr><td>DD / D</td><td>day of month, padded / unpadded</td></tr>
+	  <tr><td>dddd / ddd</td><td>Tuesday / Tue</td></tr>
+	  <tr><td>HH / H</td><td>24-hour, padded / unpadded</td></tr>
+	  <tr><td>hh / h</td><td>12-hour, padded / unpadded</td></tr>
+	  <tr><td>mm / ss / SSS</td><td>minutes / seconds / milliseconds</td></tr>
+	  <tr><td>A / a</td><td>PM / pm</td></tr>
+	  <tr><td>z / ZZ</td><td>EST / -05:00</td></tr>
+	  <tr><td>[text]</td><td>literal text, e.g. [Day] D</td></tr>
+	</table>
+  </details>
+</main>
+
+<script>
+// ---------- 1. Reference clock ----------
+// Browsers cannot speak NTP (UDP port 123), so we try an HTTP source and
+// measure how far this device's clock is from it. offsetMs = reference - device.
+let offsetMs = 0;
+let sourceLabel = "this device's clock";
+
+async function syncReference() {
+  const sources = [
+	{ // NIST (time.gov). Returns XML like <timestamp time="1762805229123456" .../> in microseconds.
+	  name: "NIST (time.gov)",
+	  url: () => "https://time.gov/actualtime.cgi?lzbc=" + Math.random().toString(36).slice(2),
+	  parse: txt => { const m = txt.match(/time="(\d+)"/); return m ? Number(m[1]) / 1000 : NaN; }
+	},
+	{ // Fallback: a public JSON time API
+	  name: "worldtimeapi.org",
+	  url: () => "https://worldtimeapi.org/api/timezone/Etc/UTC",
+	  parse: txt => JSON.parse(txt).unixtime * 1000
+	}
+  ];
+  for (const s of sources) {
+	try {
+	  const t0 = Date.now();
+	  const res = await fetch(s.url(), { cache: "no-store" });
+	  const t1 = Date.now();
+	  const ref = s.parse(await res.text());
+	  if (!isFinite(ref)) continue;
+	  // Assume the server stamped the time halfway through the round trip.
+	  offsetMs = ref - (t0 + t1) / 2;
+	  sourceLabel = `${s.name} · device clock off by ${(offsetMs / 1000).toFixed(3)} s · round trip ${t1 - t0} ms`;
+	  return;
+	} catch (e) { /* blocked by CORS or offline: try the next one */ }
+  }
+  sourceLabel = "this device's clock (no reference reachable — macOS/iOS already sync it via NTP)";
+}
+const now = () => new Date(Date.now() + offsetMs);
+
+// ---------- 2. City -> time zone (Open-Meteo geocoding, free, no key) ----------
+let zone = null, placeName = null, results = [];
+const $ = id => document.getElementById(id);
+
+async function findCity(q) {
+  $("go").disabled = true;
+  try {
+	const url = "https://geocoding-api.open-meteo.com/v1/search?count=8&language=en&name=" + encodeURIComponent(q);
+	const data = await (await fetch(url)).json();
+	results = (data.results || []).filter(r => r.timezone);
+	if (!results.length) { $("place").innerHTML = `<span class="err">No match for “${q}”.</span>`; $("matches").style.display = "none"; return; }
+	$("matches").innerHTML = results.map((r, i) =>
+	  `<option value="${i}">${[r.name, r.admin1, r.country].filter(Boolean).join(", ")} — ${r.timezone}</option>`).join("");
+	$("matches").style.display = results.length > 1 ? "block" : "none";
+	choose(0);
+  } catch (e) {
+	$("place").innerHTML = `<span class="err">Couldn't reach the city lookup service.</span>`;
+  } finally { $("go").disabled = false; }
+}
+function choose(i) {
+  const r = results[i];
+  zone = r.timezone;
+  placeName = [r.name, r.admin1, r.country].filter(Boolean).join(", ");
+  try { localStorage.setItem("cityTime", JSON.stringify({ zone, placeName, fmt: $("format").value })); } catch (e) {}
+}
+
+// ---------- 3. Formatting ----------
+function partsIn(date, tz) {
+  const get = opts => Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: tz, ...opts })
+	.formatToParts(date).map(p => [p.type, p.value]));
+  const n = get({ year:"numeric", month:"numeric", day:"numeric", hour:"numeric", minute:"numeric", second:"numeric", hourCycle:"h23" });
+  const t = get({ month:"long", weekday:"long", timeZoneName:"short" });
+  const o = get({ timeZoneName:"longOffset" }).timeZoneName; // "GMT-05:00"
+  return { Y:+n.year, M:+n.month, D:+n.day, H:+n.hour, m:+n.minute, s:+n.second,
+		   ms:date.getMilliseconds(), month:t.month, weekday:t.weekday, abbr:t.timeZoneName,
+		   offset: o === "GMT" ? "+00:00" : o.replace("GMT", "") };
+}
+const pad = (v, n = 2) => String(v).padStart(n, "0");
+
+function format(date, tz, fmt) {
+  const p = partsIn(date, tz), h12 = p.H % 12 || 12;
+  const map = {
+	YYYY:p.Y, YY:pad(p.Y % 100), MMMM:p.month, MMM:p.month.slice(0,3), MM:pad(p.M), M:p.M,
+	dddd:p.weekday, ddd:p.weekday.slice(0,3), DD:pad(p.D), D:p.D,
+	HH:pad(p.H), H:p.H, hh:pad(h12), h:h12, mm:pad(p.m), ss:pad(p.s), SSS:pad(p.ms,3),
+	A:p.H < 12 ? "AM" : "PM", a:p.H < 12 ? "am" : "pm", ZZ:p.offset, z:p.abbr
+  };
+  return fmt.replace(/\[([^\]]*)\]|YYYY|YY|MMMM|MMM|MM|M|dddd|ddd|DD|D|HH|H|hh|h|mm|ss|SSS|A|a|ZZ|z/g,
+	(tok, lit) => lit !== undefined ? lit : map[tok]);
+}
+
+// ---------- 4. Wiring ----------
+$("cityForm").addEventListener("submit", e => { e.preventDefault(); const q = $("city").value.trim(); if (q) findCity(q); });
+$("matches").addEventListener("change", e => choose(+e.target.value));
+$("preset").addEventListener("change", e => {
+  if (e.target.value !== "custom") $("format").value = e.target.value;
+  $("format").focus();
+});
+$("format").addEventListener("input", () => { $("preset").value = "custom"; if (zone) choose(+$("matches").value || 0); });
+
+try {
+  const saved = JSON.parse(localStorage.getItem("cityTime") || "null");
+  if (saved) { zone = saved.zone; placeName = saved.placeName; $("format").value = saved.fmt; $("preset").value = [...$("preset").options].some(o => o.value === saved.fmt) ? saved.fmt : "custom"; }
+} catch (e) {}
+
+function tick() {
+  if (zone) {
+	$("place").textContent = placeName;
+	try { $("time").textContent = format(now(), zone, $("format").value || "HH:mm:ss"); }
+	catch (e) { $("time").textContent = "Format error"; }
+  }
+  $("meta").textContent = "Source: " + sourceLabel;
+  setTimeout(tick, 1000 - (now().getMilliseconds()) + 5); // land just after each second boundary
+}
+syncReference().then(() => setInterval(syncReference, 10 * 60 * 1000));
+tick();
+</script>
+</body>
+</html>
